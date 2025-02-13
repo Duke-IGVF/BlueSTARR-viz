@@ -35,7 +35,7 @@ def normalize_by_lib(
     pd.DataFrame
         A DataFrame with the normalized columns.
     """
-    col_regex = "^(" + dna_prefix + "|" + rna_prefix + ")" + rep_suffix
+    col_regex = "^(" + dna_prefix + "|" + rna_prefix + ").*" + rep_suffix
     libsizes = df.filter(regex=col_regex).sum(axis=0)
     dfnorm = df.filter(regex=col_regex) / libsizes * counts_per
     if rename_func is None:
@@ -68,7 +68,7 @@ def mean_fc(df: pd.DataFrame,
     pd.Series
         A Series containing the mean fold change for each row.
     """
-    dna_cols = "^" + dna_prefix + rep_suffix
-    rna_cols = "^" + rna_prefix + rep_suffix
+    dna_cols = "^" + dna_prefix + ".*" + rep_suffix
+    rna_cols = "^" + rna_prefix + ".*" + rep_suffix
     return ((df.filter(regex=rna_cols).mean(axis=1) + pseudocount) /
             (df.filter(regex=dna_cols).mean(axis=1) + pseudocount))
