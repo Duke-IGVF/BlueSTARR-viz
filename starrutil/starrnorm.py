@@ -1,11 +1,13 @@
 import pandas as pd
+from typing import Callable, Optional
 
-def normalize_by_lib(df: pd.DataFrame,
-                     counts_per: int = 1e6,
-                     dna_prefix: str = "input",
-                     rna_prefix: str = "output",
-                     rep_suffix: str = "_rep",
-                     rename_func: callable | None = lambda x: x + "_norm") -> pd.DataFrame:
+def normalize_by_lib(
+        df: pd.DataFrame,
+        counts_per: int = 1e6,
+        dna_prefix: str = "input",
+        rna_prefix: str = "output",
+        rep_suffix: str = "_rep",
+        rename_func: Optional[Callable[[str], str]] = lambda x: x + "_norm") -> pd.DataFrame:
     """
     Normalize the DNA and RNA count columns based on library sizes.
 
