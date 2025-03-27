@@ -112,7 +112,8 @@ def allele_preds2db(source: Path | str,
                         "SPDI": [None, "allele_pos", "ref_allele", "allele"]
                     },
                     compression: str = "LZ4",
-                    verbose: bool = False) -> None:
+                    partition_by: str = "chrom",
+                    verbose: bool = False, **kwargs) -> None:
     """
     Converts a file with allele predictions to a Parquet database. The database
     will be partitioned by chromosome.
@@ -143,8 +144,12 @@ def allele_preds2db(source: Path | str,
         for the components.
     compression : str, optional
         The compression algorithm to use for the Parquet database (default is "LZ4").
+    partition_by : str, optional
+        The column to partition the database by (default is "chrom").
     verbose : bool, optional
         If True, prints progress information (default is False).
+    **kwargs : dict
+        Keyword arguments to replace individual keys in the column map.
 
     Returns
     -------
@@ -154,6 +159,14 @@ def allele_preds2db(source: Path | str,
         duckdb.execute("PRAGMA enable_progress_bar;")
         print(f"Parsing/loading input files: {source}")
 
+    if kwargs:
+        bad_keys = set(kwargs.keys()) - set(column_map.keys())
+        if bad_keys:
+            raise ValueError(f"Invalid keys in kwargs: {bad_keys}")
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        column_map.update(kwargs)
+        if verbose:
+            print(f"Updated column map: {column_map}")
     SPDI = list(column_map.keys())[-1]
     preds = duckdb.sql(
         f"select {column_map['chrom']} as chrom, " +
@@ -166,9 +179,16 @@ def allele_preds2db(source: Path | str,
     )
     if verbose:
         print("Collecting input data and writing to Parquet database")
+    partition_spec = ""
+    if partition_by:
+        if verbose:
+            print(f"Partitioning by column {partition_by}")
+        partition_spec = f"PARTITION BY ({partition_by}), FILENAME_PATTERN '{uuid}-part{i}', "
+    elif verbose:
+        print("No partitioning by column")
     duckdb.sql(
         f"COPY preds TO '{db_file}' " +
-        "(FORMAT parquet, PARTITION_BY (chrom), FILENAME_PATTERN '{uuid}-part{i}', " +
+        f"(FORMAT parquet, {partition_spec}" +
         f"OVERWRITE, COMPRESSION '{compression}')"
     )
 
@@ -184,16 +204,26 @@ def _main():
         """
     )
     parser.add_argument('--input', '-i', required=True, help='Path to the input file(s), can be a glob pattern')
-    parser.add_argument('--db', required=True, help='Path to the Parquet database (directory)')
+    parser.add_argument('--db', required=True, help='Path to the Parquet database (directory if partitioned)')
     parser.add_argument('--sep', default='\t', help='Delimiter for the input file (default is tab)')
     parser.add_argument('--compression', default='LZ4', help='Compression algorithm for the Parquet database (default is LZ4)')
+    parser.add_argument('--partition-by', default='chrom', help='Column to partition the database by (default is chrom)')
+    parser.add_argument('--chrom', default=None, help='Name of the chromosome column in the input file if different from cre_chrom')
+    parser.add_argument('--cre-start', default=None, help='Name of the cCRE start column in the input file if different from cre_start')
+    parser.add_argument('--cre-end', default=None, help='Name of the cCRE end column in the input file if different from cre_end')
+    parser.add_argument('--effect', default=None, help='Name of the effect column in the input file if different from effect')
     parser.add_argument('--verbose', '-v', action='store_true', help='Prints progress information')
     args = parser.parse_args()
     
     allele_preds2db(args.input, args.db,
                     sep=args.sep, 
                     compression=args.compression,
-                    verbose=args.verbose)
+                    partition_by=args.partition_by,
+                    verbose=args.verbose,
+                    chrom=args.chrom,
+                    cre_start=args.cre_start,
+                    cre_end=args.cre_end,
+                    log2FC=args.effect)
 
 if __name__ == "__main__":
     _main()
