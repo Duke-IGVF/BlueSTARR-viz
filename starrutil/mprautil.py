@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from Bio.Align import PairwiseAligner
 
 def read_kircher_mpra_data(data_dir: str | Path,
-                           file_path_col: str | None='file_path') -> pl.LazyFrame:
+                           file_path_col: str='file_path') -> pl.LazyFrame:
     """
     Reads MPRA (Massively Parallel Reporter Assay) data from a specified directory 
     and processes it into a Polars DataFrame.
@@ -26,9 +26,8 @@ def read_kircher_mpra_data(data_dir: str | Path,
     ----------
     data_dir : str or Path
         The directory containing the MPRA data files. Can be a string or a Path object.
-    file_path_col : str or None, optional
+    file_path_col : str 
         The name of the column to include file paths in the resulting DataFrame. 
-        If None, file paths will not be included. Default is 'file_path'.
 
     Returns
     -------
@@ -74,8 +73,8 @@ def read_kircher_mpra_data(data_dir: str | Path,
     ).drop(['Ref', 'Alt', 'Position', 'Chromosome']).drop_nulls()    
     return mut_data
 
-def get_kircher_mpra_regions(mpra_df: pl.DataFrame | pd.DataFrame=None,
-                             data_dir: str | Path=None):
+def get_kircher_mpra_regions(mpra_df: pl.LazyFrame | pl.DataFrame | pd.DataFrame | None = None,
+                             data_dir: str | Path | None = None) -> pd.DataFrame:
     """
     Function to get MPRA regions from the provided DataFrame or directory.
     
@@ -88,7 +87,7 @@ def get_kircher_mpra_regions(mpra_df: pl.DataFrame | pd.DataFrame=None,
     
     Returns
     -------
-    pl.DataFrame or pd.DataFrame
+    pd.DataFrame
         A DataFrame containing the MPRA regions. The DataFrame will have the following columns:
         - `region_type`: Type of the region (Enhancers, Promoters).
         - `region`: Name of the region.
@@ -103,6 +102,8 @@ def get_kircher_mpra_regions(mpra_df: pl.DataFrame | pd.DataFrame=None,
     end_pos - start_pos + 1.
     """
     if mpra_df is None:
+        if data_dir is None:
+            raise ValueError("Either mpra_df or data_dir must be provided.")
         mpra_df = read_kircher_mpra_data(data_dir)
     regions = duckdb.sql(
         "select region_type, region, chrom, "
@@ -169,7 +170,7 @@ def read_kircher_gksvm_data(data_dir: str | Path,
 
 def add_class_labels(df: pd.DataFrame,
                      Pval_pos: float,
-                     Pval_neg: float,
+                     Pval_neg: float | None = None,
                      abs_effect_neg: float = 0.05,
                      pos_label: str | None = None,
                      neg_label: str | None = None,
@@ -183,9 +184,10 @@ def add_class_labels(df: pd.DataFrame,
     df : pandas.DataFrame
         The input DataFrame containing MPRA data with columns for p-values, effect sizes, and tag counts.
     Pval_pos : float
-        The p-value threshold for labeling positive mutations (e.g., p < 1e-5).
+        The p-value threshold for labeling positive mutations (e.g., p <= 1e-5).
     Pval_neg : float
-        The p-value threshold for labeling negative mutations (e.g., p > 0.01).
+        The p-value threshold for labeling negative mutations (e.g., p > 0.01). By default (None),
+        it is the same as `Pval_pos`.
     abs_effect_neg : float, optional
         The maximum absolute effect size for labeling negative mutations (default is 0.05).
     pos_label : str or None, optional
@@ -210,10 +212,12 @@ def add_class_labels(df: pd.DataFrame,
     """
     df[label_col] = None
     if pos_label is None:
-        pos_label = f"MPRA p<{Pval_pos}"
+        pos_label = f"MPRA p≤{Pval_pos}"
+    if Pval_neg is None:
+        Pval_neg = Pval_pos
     if neg_label is None:
         neg_label = f"MPRA p>{Pval_neg}"
-    df.loc[(df['mpra_p_value'] < Pval_pos) &
+    df.loc[(df['mpra_p_value'] <= Pval_pos) &
            (df['mpra_tags'] >= min_tags), label_col] = pos_label 
     df.loc[(df['mpra_p_value'] > Pval_neg) &
            (df['mpra_max_log2effect'].abs() < abs_effect_neg) &
@@ -423,3 +427,66 @@ def map_to_mpra_region(gksvm_data: pd.DataFrame | pl.DataFrame | pl.LazyFrame,
             print(f"Region '{region}' has initial offset {align_blocks[1,0,0]}, adjusting relative positions.")
         gksvm_data.loc[region_mask, pos_col] -= align_blocks[1,0,0]
     return gksvm_data
+
+def join_preds_to_mpra(pred_df: pd.DataFrame | pl.DataFrame | pl.LazyFrame,
+                       mpra_df: pd.DataFrame | pl.DataFrame | pl.LazyFrame,
+                       alt_col: str='alt_allele') -> pd.DataFrame:
+    """
+    Join variant effect predictions to MPRA variant effect size data for the
+    same chromosomal regions.
+
+    The query used here for joining allows redundancy in the MPRA data for a
+    given position and mutation, such as from different experiments. It will
+    report the effective size, p-value, tags, and experiment for the largest
+    effect size across all experiments. Predictions are assumed to be
+    non-redundant, albeit if they are, simply the first value will be reported.
+
+    The function returns a DataFrame with the following columns:
+    - `region_type`: Type of the region (e.g., Enhancers, Promoters).
+    - `region`: Name of the region.
+    - `chrom`: Chromosome name.
+    - `allele_pos`: Position of the allele (zero-based).
+    - `ref_allele`: Reference allele (from MPRA data).
+    - `pred_ref_allele`: Reference allele (from predictions).
+    - `alt_allele`: Alternate allele.
+    - `log2FC`: Log2 fold change as predicted effect size. 
+    - `mpra_max_log2effect`: Maximum effect size (as log2) from MPRA data.
+    - `mpra_p_value`: P-value from MPRA data.
+    - `mpra_tags`: Tag count from MPRA data.
+    - `mpra_experiment`: Experiment name from MPRA data.
+
+    Parameters
+    ----------
+    pred_df : pandas.DataFrame, polars.DataFrame, or polars.LazyFrame
+        The DataFrame containing predictions. Must include columns for chromosome, allele position,
+        alternate allele, and log2 fold change.
+    mpra_df : pandas.DataFrame, polars.DataFrame, or polars.LazyFrame
+        The DataFrame containing MPRA data. Must include columns for region type, region, chromosome,
+        allele position, reference allele, alternate allele, value, p-value, tags, and experiment.
+    alt_col : str, optional
+        The name of the column containing alternate alleles in the predictions DataFrame (default is 'alt_allele').
+
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame containing the joined data with aggregated predictions and MPRA data.
+
+    Notes
+    -----
+    The reference alleles from both the predictions and MPRA data are reported but not used
+    in the join clause to allow sanity-checking that they are the same.
+    """
+    joined_data = duckdb.sql(
+        "select md.region_type, md.region, md.chrom, md.allele_pos, "
+        "md.ref_allele, first(p.ref_allele) as pred_ref_allele, md.alt_allele, "
+        "first(p.log2fc) as log2FC, "
+        "last(md.Value order by abs(md.Value)) as mpra_max_log2effect, "
+        "last(md.p_value order by abs(md.Value)) as mpra_p_value, "
+        "last(md.Tags order by abs(md.Value)) as mpra_tags, "
+        "last(md.experiment order by abs(md.Value)) as mpra_experiment "
+        "from pred_df p, mpra_df md "
+        "where p.chrom = md.chrom and p.allele_pos = md.allele_pos " +
+        f"and p.{alt_col} = md.alt_allele " +
+        "group by md.region_type, md.region, md.chrom, md.allele_pos, md.ref_allele, md.alt_allele "
+    ).df()
+    return joined_data
