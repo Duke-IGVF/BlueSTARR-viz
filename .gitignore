@@ -5,6 +5,9 @@
 
 .ipynb_checkpoints
 __pycache__
+.tmp
 
 *.csv
 *.gz
+
+figs
