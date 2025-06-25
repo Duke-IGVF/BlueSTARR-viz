@@ -8,7 +8,8 @@ import argparse
 
 def read_pred_table(pred_file: Path | str,
                     convFC: Optional[Callable[[float], float]] = lambda x: x/np.log(2),
-                    FC_name: str = "log2FC") -> pd.DataFrame:
+                    FC_name: str = "log2FC",
+                    relFC_name: str = "FC_to_ref") -> pd.DataFrame:
     """
     Reads a prediction table from a file and processes it. The file is expected to
     have the following format:
@@ -33,7 +34,10 @@ def read_pred_table(pred_file: Path | str,
         Function to convert the fold change values (default is
         lambda x: x/np.log(2), to convert values from log to log2).
     FC_name : str, optional
-        Name of the fold change column (default is "log2FC").
+        Name to assign to the fold change column (default is "log2FC").
+    relFC_name : str, optional
+        Name to assign to the relative fold change column of alternative
+        to reference allele (default is "FC_to_ref").
 
     Returns
     -------
@@ -58,7 +62,7 @@ def read_pred_table(pred_file: Path | str,
     # compute relative activation of allele to ref
     refFC = pred_table.loc[pred_table["ref_allele"] == pred_table["allele"], [FC_name]]
     refFC = refFC.loc[refFC.index.repeat(4)].reset_index(drop=True)
-    pred_table["FC_to_ref"] = pred_table[FC_name] - refFC[FC_name]
+    pred_table[relFC_name] = pred_table[FC_name] - refFC[FC_name]
     # done
     return pred_table
 
@@ -101,22 +105,18 @@ def read_pred_table2(source: Path | str,
         pl.col('allele_pos').cast(pl.UInt32)
     )
 
-def allele_preds2db(source: Path | str,
-                    db_file: Path | str,
-                    sep: str = "\t",
-                    column_map: dict[str, str] = {
-                        "chrom": "cre_chrom", 
+def read_pred_table3(source: Path | str,
+                     sep: str = "\t",
+                     column_map: dict[str, str] = {
+                        "chrom": "cre_chrom",
                         "cre_start": "cre_start",
                         "cre_end": "cre_end",
                         "log2FC": "effect",
                         "SPDI": [None, "allele_pos", "ref_allele", "allele"]
-                    },
-                    compression: str = "LZ4",
-                    partition_by: str = "chrom",
-                    verbose: bool = False, **kwargs) -> None:
+                     },
+                     verbose: bool = False, **kwargs) -> duckdb.DuckDBPyRelation:
     """
-    Converts a file with allele predictions to a Parquet database. The database
-    will be partitioned by chromosome.
+    Reads a file with allele predictions into a DuckDB relation.
 
     The file(s) is/are expected to be in the "processed" format, with the following
     columns (order does not matter, but names must match the values of the column_map):
@@ -132,9 +132,6 @@ def allele_preds2db(source: Path | str,
     source : Path or str
         Path to the input file(s) containing allele predictions in the "processed" format.
         This can be a single file or a glob pattern.
-    db_file : Path or str
-        Path to the output Parquet database file. An already existing database will
-        be deleted rather than appended to.
     sep : str, optional
         The delimiter to use for parsing the input file(s) (default is "\t").
     column_map : dict[str, str], optional
@@ -142,10 +139,6 @@ def allele_preds2db(source: Path | str,
         database, except for the last key, which is the name of the SPDI column
         in the input files, and as value has an array of database column names
         for the components.
-    compression : str, optional
-        The compression algorithm to use for the Parquet database (default is "LZ4").
-    partition_by : str, optional
-        The column to partition the database by (default is "chrom").
     verbose : bool, optional
         If True, prints progress information (default is False).
     **kwargs : dict
@@ -155,10 +148,6 @@ def allele_preds2db(source: Path | str,
     -------
     None
     """
-    if verbose:
-        duckdb.execute("PRAGMA enable_progress_bar;")
-        print(f"Parsing/loading input files: {source}")
-
     if kwargs:
         bad_keys = set(kwargs.keys()) - set(column_map.keys())
         if bad_keys:
@@ -177,8 +166,89 @@ def allele_preds2db(source: Path | str,
         f"string_split({SPDI}, ':')[4] as {column_map[SPDI][3]} " +
         f"from read_csv('{source}', delim='{sep}')"
     )
+    return preds
+
+def allele_preds2db(source: Path | str,
+                    db_file: Path | str,
+                    sep: str = "\t",
+                    format: str = "processed",
+                    column_map: dict[str, str] = {
+                        "chrom": "cre_chrom",
+                        "cre_start": "cre_start",
+                        "cre_end": "cre_end",
+                        "log2FC": "effect",
+                        "SPDI": [None, "allele_pos", "ref_allele", "allele"]
+                    },
+                    compression: str = "LZ4",
+                    partition_by: str = "chrom",
+                    verbose: bool = False, **kwargs) -> None:
+    """
+    Converts a file with allele predictions to a Parquet database. The database
+    will optionally be partitioned by the column specified in `partition_by`.
+
+    By default the file(s) is/are expected to be in the "processed" format, with the following
+    columns (order does not matter, but names must match the values of the column_map):
+    
+    - cre_chrom: chromosome of the cCRE region
+    - cre_start: start position of the cCRE region
+    - cre_end: end position of the cCRE region
+    - SPDI: the SPDI notation of the mutation (name must match the last key of column_map)
+    - effect: the predicted fold change value of the mutation compared to reference
+
+    Parameters
+    ----------
+    source : Path or str
+        Path to the input file(s) containing allele predictions in the "processed" format.
+        This can be a single file or a glob pattern.
+    db_file : Path or str
+        Path to the output Parquet database file. An already existing database will
+        be deleted rather than appended to.
+    sep : str, optional
+        The delimiter to use for parsing the input file(s) (default is "\t").
+    format : str, optional
+        Format of the input file(s) (default is "processed", anything else is treated as "unprocessed").
+    column_map : dict[str, str], optional
+        A mapping of database column names to input file column names Parquet
+        database, except for the last key, which is the name of the SPDI column
+        in the input files, and as value has an array of database column names
+        for the components. This is only used if the format is "processed".
+    compression : str, optional
+        The compression algorithm to use for the Parquet database (default is "LZ4").
+    partition_by : str, optional
+        The column to partition the database by (default is "chrom").
+    verbose : bool, optional
+        If True, prints progress information (default is False).
+    **kwargs : dict
+        Keyword arguments to replace individual keys in the column map.
+
+    Returns
+    -------
+    None
+    """
     if verbose:
-        print("Collecting input data and writing to Parquet database")
+        duckdb.execute("PRAGMA enable_progress_bar;")
+        print(f"Parsing/loading input files: {source}")
+
+    preds = None
+    if verbose:
+        print("Collecting input data")
+    if format == "processed":
+        preds = read_pred_table3(
+            source, sep=sep, column_map=column_map, verbose=verbose, **kwargs
+        )
+    else:
+        if verbose:
+            print(f"Reading input file in unprocessed format")
+        preds = read_pred_table(source, convFC=None, FC_name="effect", relFC_name="log2FC")
+        # drop the rows where allele is equal to reference allele
+        preds = preds[preds['allele'] != preds['ref_allele']].reset_index(drop=True)
+        # rename columns to match the expected format
+        preds.rename(columns={"cre_chrom": "chrom"}, inplace=True)
+        # change to DuckDB relation
+        preds = duckdb.from_df(preds)
+
+    if verbose:
+        print("Writing to Parquet database")
     partition_spec = ""
     if partition_by:
         if verbose:
@@ -196,7 +266,7 @@ def _main():
     parser = argparse.ArgumentParser(
         description="""
         Converts file(s) with mutation effect predictions to a Parquet database as output.
-        The file(s) is/are expected to be in the "processed" format, with columns
+        By default, the file(s) is/are expected to be in the "processed" format, with columns
         cre_chrom (chromosome of the cCRE region), cre_start (start position of the cCRE region),
         cre_end (end position of the cCRE region), SPDI (the SPDI notation of the mutation),
         and effect (the predicted log2 fold change value of the mutation compared to reference).
@@ -206,17 +276,21 @@ def _main():
     parser.add_argument('--input', '-i', required=True, help='Path to the input file(s), can be a glob pattern')
     parser.add_argument('--db', required=True, help='Path to the Parquet database (directory if partitioned)')
     parser.add_argument('--sep', default='\t', help='Delimiter for the input file (default is tab)')
+    parser.add_argument('--format', default='processed',
+                        type=lambda x: "processed" if "processed".startswith(x) else "unprocessed",
+                        help='Format of the input file(s) (default is "processed", any value that is not a prefix of "processed" is treated as "unprocessed")')
     parser.add_argument('--compression', default='LZ4', help='Compression algorithm for the Parquet database (default is LZ4)')
     parser.add_argument('--partition-by', default='chrom', help='Column to partition the database by (default is chrom)')
-    parser.add_argument('--chrom', default=None, help='Name of the chromosome column in the input file if different from cre_chrom')
-    parser.add_argument('--cre-start', default=None, help='Name of the cCRE start column in the input file if different from cre_start')
-    parser.add_argument('--cre-end', default=None, help='Name of the cCRE end column in the input file if different from cre_end')
-    parser.add_argument('--effect', default=None, help='Name of the effect column in the input file if different from effect')
+    parser.add_argument('--chrom', default=None, help='Name of the chromosome column in the input file if different from cre_chrom (processed format only)')
+    parser.add_argument('--cre-start', default=None, help='Name of the cCRE start column in the input file if different from cre_start (processed format only)')
+    parser.add_argument('--cre-end', default=None, help='Name of the cCRE end column in the input file if different from cre_end (processed format only)')
+    parser.add_argument('--effect', default=None, help='Name of the effect column in the input file if different from effect (processed format only)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Prints progress information')
     args = parser.parse_args()
     
     allele_preds2db(args.input, args.db,
-                    sep=args.sep, 
+                    format=args.format,
+                    sep=args.sep,
                     compression=args.compression,
                     partition_by=args.partition_by,
                     verbose=args.verbose,
