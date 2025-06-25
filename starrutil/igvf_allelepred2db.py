@@ -183,7 +183,7 @@ def allele_preds2db(source: Path | str,
     if partition_by:
         if verbose:
             print(f"Partitioning by column {partition_by}")
-        partition_spec = f"PARTITION BY ({partition_by}), FILENAME_PATTERN '{uuid}-part{i}', "
+        partition_spec = f"PARTITION BY ({partition_by}), FILENAME_PATTERN '{{uuid}}-part{{i}}', "
     elif verbose:
         print("No partitioning by column")
     duckdb.sql(
